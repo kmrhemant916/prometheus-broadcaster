@@ -33,8 +33,8 @@ type Config struct {
 }
 
 type User struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 func main() {
@@ -68,36 +68,6 @@ func main() {
 	collection, err := createCollectionIfNotExistsWithRetry(ctx, db, "users", 5, 3*time.Second)
 	if err != nil {
 		log.Fatal(err)
-	}
-	authMiddleware := func(c *gin.Context) {
-		tokenString := c.GetHeader("Authorization")
-		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Check the token signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return config.JWTKey, nil
-		})
-
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-			c.Abort()
-			return
-		}
-
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			c.Set("username", claims["username"])
-			c.Next()
-		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
-			c.Abort()
-		}
 	}
 	r.POST("/token", func(c *gin.Context) {
 		var user User
@@ -150,6 +120,36 @@ func main() {
 		log.Fatal(err)
 	}
 	defer nc.Close()
+	authMiddleware := func(c *gin.Context) {
+		tokenString := c.Request.Header.Get("x-auth-token")
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.Abort()
+			return
+		}
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// Check the token signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(config.JWTKey), nil  // Ensure JWTKey is converted to []byte
+		})
+	
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			c.Abort()
+			return
+		}
+	
+		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+			c.Set("username", claims["username"])
+			c.Next()
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+		}
+	}
+	
 	r.POST("/publish", authMiddleware, func(c *gin.Context) {
 		var body struct {
 			Message string `json:"message"`

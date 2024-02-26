@@ -7,5 +7,7 @@ RUN go build -o prometheus-broadcaster .
 FROM alpine:latest
 WORKDIR /app
 COPY --from=build /app/prometheus-broadcaster .
+COPY --from=build /app/config/config.yaml .
+RUN ls
 EXPOSE 8080
 CMD ["./prometheus-broadcaster"]

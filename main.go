@@ -61,11 +61,11 @@ func main() {
 	}
 	log.Println("Connected to ArangoDB")
 	ctx := context.Background()
-	db, err := createDatabaseIfNotExists(ctx, conn, config.ArangoDB.Database)
+	db, err := createDatabaseIfNotExistsWithRetry(ctx, conn, config.ArangoDB.Database, 5, 3*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
-	collection, err := createCollectionIfNotExists(ctx, db, "users")
+	collection, err := createCollectionIfNotExistsWithRetry(ctx, db, "users", 5, 3*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func main() {
 			"username": user.Username,
 		}
 	
-		cursor, err := collection.Database().Query(ctx, query, bindVars)
+		cursor, err := queryWithRetry(ctx, collection, query, bindVars, 5, 3*time.Second)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -248,6 +248,21 @@ func connectWithRetry(endpoints driver.Connection, username, password string, re
     return nil, fmt.Errorf("failed to connect after %d attempts", retries)
 }
 
+func queryWithRetry(ctx context.Context, collection driver.Collection, query string, bindVars map[string]interface{}, retries int, delay time.Duration) (driver.Cursor, error) {
+    var cursor driver.Cursor
+    var err error
+    for i := 0; i < retries; i++ {
+        log.Printf("Querying database (attempt %d/%d)", i+1, retries)
+        cursor, err = collection.Database().Query(ctx, query, bindVars)
+        if err == nil {
+            return cursor, nil
+        }
+        log.Printf("Query attempt failed: %v", err)
+        time.Sleep(delay)
+    }
+    return nil, fmt.Errorf("failed to query database after %d attempts", retries)
+}
+
 func createDatabaseIfNotExists(ctx context.Context, client driver.Client, dbName string) (driver.Database, error) {
 	exists, err := client.DatabaseExists(ctx, dbName)
 	if err != nil {
@@ -268,4 +283,34 @@ func createCollectionIfNotExists(ctx context.Context, db driver.Database, collec
 		return db.CreateCollection(ctx, collectionName, nil)
 	}
 	return db.Collection(ctx, collectionName)
+}
+
+func createDatabaseIfNotExistsWithRetry(ctx context.Context, client driver.Client, dbName string, retries int, delay time.Duration) (driver.Database, error) {
+    var db driver.Database
+    var err error
+    for i := 0; i < retries; i++ {
+        log.Printf("Checking if database %s exists (attempt %d/%d)", dbName, i+1, retries)
+        db, err = createDatabaseIfNotExists(ctx, client, dbName)
+        if err == nil {
+            return db, nil
+        }
+        log.Printf("Database creation attempt failed: %v", err)
+        time.Sleep(delay)
+    }
+    return nil, fmt.Errorf("failed to create database %s after %d attempts", dbName, retries)
+}
+
+func createCollectionIfNotExistsWithRetry(ctx context.Context, db driver.Database, collectionName string, retries int, delay time.Duration) (driver.Collection, error) {
+    var collection driver.Collection
+    var err error
+    for i := 0; i < retries; i++ {
+        log.Printf("Checking if collection %s exists (attempt %d/%d)", collectionName, i+1, retries)
+        collection, err = createCollectionIfNotExists(ctx, db, collectionName)
+        if err == nil {
+            return collection, nil
+        }
+        log.Printf("Collection creation attempt failed: %v", err)
+        time.Sleep(delay)
+    }
+    return nil, fmt.Errorf("failed to create collection %s after %d attempts", collectionName, retries)
 }

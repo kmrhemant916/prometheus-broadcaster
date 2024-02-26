@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-
-	"net/smtp"
 
 	driver "github.com/arangodb/go-driver"
 	arangodbHTTP "github.com/arangodb/go-driver/http"
@@ -55,15 +54,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-    conn, err := driver.NewClient(driver.ClientConfig{
-        Connection: endpoints,
-        Authentication: driver.BasicAuthentication(config.ArangoDB.Username, config.ArangoDB.Password),
-    })
+	log.Printf("Connecting to ArangoDB at %s...", config.ArangoDB.Host)
+	conn, err := connectWithRetry(endpoints, config.ArangoDB.Username, config.ArangoDB.Password, 5, 3*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Println("Connected to ArangoDB")
 	ctx := context.Background()
-	db, err := conn.Database(ctx, config.ArangoDB.Database)
+	db, err := createDatabaseIfNotExists(ctx, conn, config.ArangoDB.Database)
+	if err != nil {
+		log.Fatal(err)
+	}
+	collection, err := createCollectionIfNotExists(ctx, db, "users")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -110,7 +112,7 @@ func main() {
 			"username": user.Username,
 		}
 	
-		cursor, err := db.Query(ctx, query, bindVars)
+		cursor, err := collection.Database().Query(ctx, query, bindVars)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -123,13 +125,7 @@ func main() {
 		}
 	
 		// Create the user document in the users collection
-		usersCollection, err := db.Collection(ctx, "users")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	
-		_, err = usersCollection.CreateDocument(ctx, user)
+		_, err = collection.CreateDocument(ctx, user)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -234,3 +230,42 @@ func sendEmail(message string) error {
     return err
 }
 
+func connectWithRetry(endpoints driver.Connection, username, password string, retries int, delay time.Duration) (driver.Client, error) {
+    var client driver.Client
+    var err error
+    for i := 0; i < retries; i++ {
+        log.Printf("Attempting to connect (attempt %d/%d)", i+1, retries)
+        client, err = driver.NewClient(driver.ClientConfig{
+            Connection:     endpoints,
+            Authentication: driver.BasicAuthentication(username, password),
+        })
+        if err == nil {
+            return client, nil
+        }
+        log.Printf("Connection attempt failed: %v", err)
+        time.Sleep(delay)
+    }
+    return nil, fmt.Errorf("failed to connect after %d attempts", retries)
+}
+
+func createDatabaseIfNotExists(ctx context.Context, client driver.Client, dbName string) (driver.Database, error) {
+	exists, err := client.DatabaseExists(ctx, dbName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return client.CreateDatabase(ctx, dbName, nil)
+	}
+	return client.Database(ctx, dbName)
+}
+
+func createCollectionIfNotExists(ctx context.Context, db driver.Database, collectionName string) (driver.Collection, error) {
+	exists, err := db.CollectionExists(ctx, collectionName)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return db.CreateCollection(ctx, collectionName, nil)
+	}
+	return db.Collection(ctx, collectionName)
+}

@@ -5,7 +5,7 @@ arangodb:
   host: http://arangodb:8529
   username: root
   password: root
-  database: _system
+  database: prometheus
 smpt:
   host: "smtp.sendgrid.net"
   port: "587"

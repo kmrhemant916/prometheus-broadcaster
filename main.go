@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"net/smtp"
@@ -17,7 +18,9 @@ func main() {
 	r := gin.Default()
 
 	// NATS connection
-	nc, err := nats.Connect(nats.DefaultURL)
+	// nc, err := nats.Connect(nats.DefaultURL)
+	nc, err := nats.Connect("nats://127.0.0.1:4222")
+	
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,30 +74,32 @@ func main() {
 }
 
 func sendEmail(message string) error {
-	// Set the SendGrid SMTP server and port
-	server := "smtp.sendgrid.net"
-	port := 587
+    // Set the SendGrid SMTP server and port
+    server := "smtp.sendgrid.net"
+    port := 587
 
-	// Set the SendGrid username and password
-	username := os.Getenv("SENDGRID_USERNAME")
-	password := os.Getenv("SENDGRID_PASSWORD")
+    // Set the SendGrid username and password
+    username := os.Getenv("SENDGRID_USERNAME")
+    password := os.Getenv("SENDGRID_PASSWORD")
 
-	// Set up authentication information
-	auth := smtp.PlainAuth("", username, password, server)
+    // Set up authentication information
+    auth := smtp.PlainAuth("", username, password, server)
 
-	// Set up email content
-	from := "hemank@altair.com"
-	to := []string{"hemank@altair.com"}
-	subject := "Alert"
-	body := message
+    // Set up email content
+    from := "Sender Name <sender@example.com>"
+    to := []string{"recipient@example.com"}
+    subject := "Alert"
+    body := message
 
-	// Compose the email message
-	msg := []byte("To: " + to[0] + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"\r\n" +
-		body + "\r\n")
+    // Compose the email message
+    msg := []byte("From: " + from + "\r\n" +
+        "To: " + strings.Join(to, ",") + "\r\n" +
+        "Subject: " + subject + "\r\n" +
+        "\r\n" +
+        body + "\r\n")
 
-	// Send the email
-	err := smtp.SendMail(server+":"+strconv.Itoa(port), auth, from, to, msg)
-	return err
+    // Send the email
+    err := smtp.SendMail(server+":"+strconv.Itoa(port), auth, from, to, msg)
+    return err
 }
+

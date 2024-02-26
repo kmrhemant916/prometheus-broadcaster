@@ -1,2 +1,11 @@
 service:
   port: "8080"
+jwt_key: 6f830f62522fb203af2b71a1
+arangodb:
+  host: http://arangodb:8529
+  username: root
+  password: root
+  database: _system
+smpt:
+  host: "smtp.sendgrid.net"
+  port: "587"

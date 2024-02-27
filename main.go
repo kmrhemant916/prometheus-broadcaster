@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -149,21 +150,50 @@ func main() {
 			c.Abort()
 		}
 	}
-	
 	r.POST("/publish", authMiddleware, func(c *gin.Context) {
 		var body struct {
-			Message string `json:"message"`
+			Alerts []struct {
+				Labels      map[string]string `json:"labels"`
+				Annotations map[string]string `json:"annotations"`
+			} `json:"alerts"`
 		}
 		if err := c.BindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		err := nc.Publish("alerts", []byte(body.Message))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish message"})
+	
+		for _, alert := range body.Alerts {
+			alertData := struct {
+				Labels      map[string]string `json:"labels"`
+				Annotations map[string]string `json:"annotations"`
+			}{
+				Labels:      alert.Labels,
+				Annotations: alert.Annotations,
+			}
+	
+			data, err := json.Marshal(alertData)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal alert data"})
+				return
+			}
+			err = nc.Publish("alerts", data)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish message"})
+				return
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Messages published successfully"})
+	})
+	r.GET("/health", func(c *gin.Context) {
+		if nc == nil || nc.IsClosed() {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "NATS connection not available"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "Message published successfully"})
+		if db == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ArangoDB connection not available"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	go func() {
 		sub, err := nc.SubscribeSync("alerts")
@@ -185,7 +215,7 @@ func main() {
 				log.Println("Error getting message:", err)
 				continue
 			}
-			fmt.Println([]byte(msg.Data))
+			fmt.Println(string(msg.Data))
 
 			// SendGrid email alert
 			// err = sendEmail(string(msg.Data))

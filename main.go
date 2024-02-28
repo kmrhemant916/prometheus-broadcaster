@@ -127,18 +127,27 @@ func main() {
 	}
 	defer nc.Close()
 	authMiddleware := func(c *gin.Context) {
-		tokenString := c.Request.Header.Get("x-auth-token")
-		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		authorizationHeader := c.Request.Header.Get("Authorization")
+		if authorizationHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing Authorization header"})
 			c.Abort()
 			return
 		}
+	
+		parts := strings.Split(authorizationHeader, " ")
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization header format"})
+			c.Abort()
+			return
+		}
+	
+		tokenString := parts[1]
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			// Check the token signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return []byte(config.JWTKey), nil  // Ensure JWTKey is converted to []byte
+			return []byte(config.JWTKey), nil // Ensure JWTKey is converted to []byte
 		})
 	
 		if err != nil {
@@ -155,6 +164,7 @@ func main() {
 			c.Abort()
 		}
 	}
+	
 	r.POST("/publish", authMiddleware, func(c *gin.Context) {
 		var body struct {
 			Alerts []struct {

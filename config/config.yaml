@@ -2,10 +2,12 @@ service:
   port: "8080"
 jwt_key: 6f830f62522fb203af2b71a1
 arangodb:
-  host: http://arangodb.kube-arangodb.svc.cluster.local:8529
-  username: prometheus
+  # host: https://arangodb.kube-arangodb.svc.cluster.local:8529
+  host: http://arangodb:8529
+  # username: prometheus
+  username: root
   password: prometheus
   database: prometheus
 smpt:
   host: "smtp.sendgrid.net"
-  port: "587"
+  port: 587

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-broadcaster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-broadcaster
+  template:
+    metadata:
+      labels:
+        app: prometheus-broadcaster
+    spec:
+      containers:
+      - name: prometheus-broadcaster
+        image: altair365.azurecr.io/prometheus-broadcaster:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: CONFIG_PATH
+          value: "/app/config.yaml"
+        - name: SENDGRID_USERNAME
+          value: "apikey"
+        - name: SENDGRID_PASSWORD
+          value: "xx"
+        - name: NATS_URI
+          value: "nats://nats:4222"
+      imagePullSecrets:
+      - name: acr-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-broadcaster
+spec:
+  selector:
+    app: prometheus-broadcaster
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: your-ingress-name
+  annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-az-altairone
+      kubernetes.io/ingress.class: nginx
+      kubernetes.io/tls-acme: 'true'
+spec:
+  rules:
+    - host: prometheus-broadcaster.az.altairone.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: prometheus-broadcaster
+                port:
+                  number: 80
+  tls:
+  - hosts:
+    - prometheus-broadcaster.az.altairone.com
+    secretName: grafana

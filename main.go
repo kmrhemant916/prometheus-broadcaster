@@ -2,242 +2,55 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"net/smtp"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
-	driver "github.com/arangodb/go-driver"
-	arangodbHTTP "github.com/arangodb/go-driver/http"
-	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt"
+	"github.com/kmrhemant916/prometheus-broadcaster/config"
+	"github.com/kmrhemant916/prometheus-broadcaster/routes"
+	"github.com/kmrhemant916/prometheus-broadcaster/utils"
 	"github.com/nats-io/nats.go"
-	"gopkg.in/yaml.v2"
 )
 
-type Config struct {
-    Service struct {
-        Port string `yaml:"port"`
-    } `yaml:"service"`
-	JWTKey string `yaml:"jwt_key"`
-    ArangoDB struct {
-        Host string `yaml:"host"`
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
-		Database string `yaml:"database"`
-    } `yaml:"arangodb"`
-}
-
-type User struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
-
 func main() {
-	data, err := os.ReadFile(os.Getenv("CONFIG_PATH"))
-	if err != nil {
-		log.Fatalf("error reading YAML file: %v", err)
-	}
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		log.Fatalf("error unmarshaling YAML data: %v", err)
-	}
-	r := gin.Default()
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-	}
-    endpoints, err := arangodbHTTP.NewConnection(arangodbHTTP.ConnectionConfig{
-        Endpoints: []string{config.ArangoDB.Host},
-		TLSConfig: tlsConfig,
-    })
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Connecting to ArangoDB at %s...", config.ArangoDB.Host)
-	conn, err := connectWithRetry(endpoints, config.ArangoDB.Username, config.ArangoDB.Password, 5, 3*time.Second)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println("Connected to ArangoDB")
-	ctx := context.Background()
-	db, err := createDatabaseIfNotExistsWithRetry(ctx, conn, config.ArangoDB.Database, 5, 3*time.Second)
-	if err != nil {
-		log.Fatal(err)
-	}
-	collection, err := createCollectionIfNotExistsWithRetry(ctx, db, "users", 5, 3*time.Second)
-	if err != nil {
-		log.Fatal(err)
-	}
-	r.POST("/token", func(c *gin.Context) {
-		var user User
-		if err := c.ShouldBindJSON(&user); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-	
-		// Check if the user already exists
-		query := "FOR u IN users FILTER u.username == @username RETURN u"
-		bindVars := map[string]interface{}{
-			"username": user.Username,
-		}
-	
-		cursor, err := queryWithRetry(ctx, collection, query, bindVars, 5, 3*time.Second)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		defer cursor.Close()
-	
-		if cursor.HasMore() {
-			c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
-			return
-		}
-	
-		// Create the user document in the users collection
-		_, err = collection.CreateDocument(ctx, user)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	
-		// Generate JWT token
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"username": user.Username,
-			"exp":      time.Now().Add(time.Hour * 24).Unix(),
-		})
-	
-		tokenString, err := token.SignedString([]byte(config.JWTKey))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-			return
-		}
-	
-		c.JSON(http.StatusOK, gin.H{"token": tokenString})
-	})
+	var config config.Config
+	c, err:= config.ReadConf(os.Getenv("CONFIG_PATH"))
+    if err != nil {
+        panic(err)
+    }
 	nc, err := nats.Connect(os.Getenv("NATS_URI"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer nc.Close()
-	authMiddleware := func(c *gin.Context) {
-		authorizationHeader := c.Request.Header.Get("Authorization")
-		if authorizationHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing Authorization header"})
-			c.Abort()
-			return
-		}
-	
-		parts := strings.Split(authorizationHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization header format"})
-			c.Abort()
-			return
-		}
-	
-		tokenString := parts[1]
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Check the token signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(config.JWTKey), nil // Ensure JWTKey is converted to []byte
-		})
-	
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-			c.Abort()
-			return
-		}
-	
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			c.Set("username", claims["username"])
-			c.Next()
-		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
-			c.Abort()
-		}
+	conn, err := utils.Connection(c.ArangoDB.Host, c.ArangoDB.Database, c.ArangoDB.Password, c.ArangoDB.Username)
+	if err != nil {
+		log.Fatal(err)
 	}
-	
-	r.POST("/publish", authMiddleware, func(c *gin.Context) {
-		var body struct {
-			Alerts []struct {
-				Labels      map[string]string `json:"labels"`
-				Annotations map[string]string `json:"annotations"`
-			} `json:"alerts"`
-		}
-		if err := c.BindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-	
-		for _, alert := range body.Alerts {
-			alertData := struct {
-				Labels      map[string]string `json:"labels"`
-				Annotations map[string]string `json:"annotations"`
-			}{
-				Labels:      alert.Labels,
-				Annotations: alert.Annotations,
-			}
-	
-			data, err := json.Marshal(alertData)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal alert data"})
-				return
-			}
-			err = nc.Publish("alerts", data)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish message"})
-				return
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{"message": "Messages published successfully"})
-	})
-	r.GET("/health", func(c *gin.Context) {
-		if err := nc.Publish("health-check", []byte("test")); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish test message to NATS"})
-			return
-		}
-		ctx := context.Background()
-		cursor, err := collection.Database().Query(ctx, "RETURN 1", nil)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query ArangoDB"})
-			return
-		}
-		defer cursor.Close()
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
-	
+	ctx := context.Background()
+	collection := utils.InitialiseServices(ctx, conn, c.ArangoDB.Database)
+	r := routes.SetupRoutes(nc, conn, c, collection)
 	go func() {
 		sub, err := nc.SubscribeSync("alerts")
 		if err != nil {
 			log.Fatal(err)
 		}
 		for {
-			// Wait for a message for up to 5 seconds
 			start := time.Now()
 			msg, err := sub.NextMsg(5 * time.Second)
 			if err != nil {
-				// Check if the error is a timeout based on elapsed time
 				elapsed := time.Since(start)
 				if elapsed >= 5*time.Second {
 					log.Println("No message received")
 					continue
 				}
-
 				log.Println("Error getting message:", err)
 				continue
 			}
 			fmt.Println(string(msg.Data))
-
-			// SendGrid email alert
-			// err = sendEmail(string(msg.Data))
+			// err = utils.SendEmail(string(msg.Data), c)
 			// if err != nil {
 			// 	log.Println("Error sending email:", err)
 			// } else {
@@ -245,121 +58,5 @@ func main() {
 			// }
 		}
 	}()
-
-	r.Run(":"+config.Service.Port)
-}
-
-func sendEmail(message string) error {
-    // Set the SendGrid SMTP server and port
-    server := "smtp.sendgrid.net"
-    port := 587
-
-    // Set the SendGrid username and password
-    username := os.Getenv("SENDGRID_USERNAME")
-    password := os.Getenv("SENDGRID_PASSWORD")
-
-    // Set up authentication information
-    auth := smtp.PlainAuth("", username, password, server)
-
-    // Set up email content
-    from := "Sender Name <sender@example.com>"
-    to := []string{"recipient@example.com"}
-    subject := "Alert"
-    body := message
-
-    // Compose the email message
-    msg := []byte("From: " + from + "\r\n" +
-        "To: " + strings.Join(to, ",") + "\r\n" +
-        "Subject: " + subject + "\r\n" +
-        "\r\n" +
-        body + "\r\n")
-
-    // Send the email
-    err := smtp.SendMail(server+":"+strconv.Itoa(port), auth, from, to, msg)
-    return err
-}
-
-func connectWithRetry(endpoints driver.Connection, username, password string, retries int, delay time.Duration) (driver.Client, error) {
-    var client driver.Client
-    var err error
-    for i := 0; i < retries; i++ {
-        log.Printf("Attempting to connect (attempt %d/%d)", i+1, retries)
-        client, err = driver.NewClient(driver.ClientConfig{
-            Connection:     endpoints,
-            Authentication: driver.BasicAuthentication(username, password),
-        })
-        if err == nil {
-            return client, nil
-        }
-        log.Printf("Connection attempt failed: %v", err)
-        time.Sleep(delay)
-    }
-    return nil, fmt.Errorf("failed to connect after %d attempts", retries)
-}
-
-func queryWithRetry(ctx context.Context, collection driver.Collection, query string, bindVars map[string]interface{}, retries int, delay time.Duration) (driver.Cursor, error) {
-    var cursor driver.Cursor
-    var err error
-    for i := 0; i < retries; i++ {
-        log.Printf("Querying database (attempt %d/%d)", i+1, retries)
-        cursor, err = collection.Database().Query(ctx, query, bindVars)
-        if err == nil {
-            return cursor, nil
-        }
-        log.Printf("Query attempt failed: %v", err)
-        time.Sleep(delay)
-    }
-    return nil, fmt.Errorf("failed to query database after %d attempts", retries)
-}
-
-func createDatabaseIfNotExists(ctx context.Context, client driver.Client, dbName string) (driver.Database, error) {
-	exists, err := client.DatabaseExists(ctx, dbName)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return client.CreateDatabase(ctx, dbName, nil)
-	}
-	return client.Database(ctx, dbName)
-}
-
-func createCollectionIfNotExists(ctx context.Context, db driver.Database, collectionName string) (driver.Collection, error) {
-	exists, err := db.CollectionExists(ctx, collectionName)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return db.CreateCollection(ctx, collectionName, nil)
-	}
-	return db.Collection(ctx, collectionName)
-}
-
-func createDatabaseIfNotExistsWithRetry(ctx context.Context, client driver.Client, dbName string, retries int, delay time.Duration) (driver.Database, error) {
-    var db driver.Database
-    var err error
-    for i := 0; i < retries; i++ {
-        log.Printf("Checking if database %s exists (attempt %d/%d)", dbName, i+1, retries)
-        db, err = createDatabaseIfNotExists(ctx, client, dbName)
-        if err == nil {
-            return db, nil
-        }
-        log.Printf("Database creation attempt failed: %v", err)
-        time.Sleep(delay)
-    }
-    return nil, fmt.Errorf("failed to create database %s after %d attempts", dbName, retries)
-}
-
-func createCollectionIfNotExistsWithRetry(ctx context.Context, db driver.Database, collectionName string, retries int, delay time.Duration) (driver.Collection, error) {
-    var collection driver.Collection
-    var err error
-    for i := 0; i < retries; i++ {
-        log.Printf("Checking if collection %s exists (attempt %d/%d)", collectionName, i+1, retries)
-        collection, err = createCollectionIfNotExists(ctx, db, collectionName)
-        if err == nil {
-            return collection, nil
-        }
-        log.Printf("Collection creation attempt failed: %v", err)
-        time.Sleep(delay)
-    }
-    return nil, fmt.Errorf("failed to create collection %s after %d attempts", collectionName, retries)
+	http.ListenAndServe(":"+c.Service.Port, r)
 }

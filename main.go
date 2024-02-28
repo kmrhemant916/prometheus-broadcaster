@@ -185,16 +185,20 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Messages published successfully"})
 	})
 	r.GET("/health", func(c *gin.Context) {
-		if nc == nil || nc.IsClosed() {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "NATS connection not available"})
+		if err := nc.Publish("health-check", []byte("test")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish test message to NATS"})
 			return
 		}
-		if db == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "ArangoDB connection not available"})
+		ctx := context.Background()
+		cursor, err := collection.Database().Query(ctx, "RETURN 1", nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query ArangoDB"})
 			return
 		}
+		defer cursor.Close()
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	
 	go func() {
 		sub, err := nc.SubscribeSync("alerts")
 		if err != nil {

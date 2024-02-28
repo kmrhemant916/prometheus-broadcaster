@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -49,8 +50,12 @@ func main() {
 		log.Fatalf("error unmarshaling YAML data: %v", err)
 	}
 	r := gin.Default()
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true,
+	}
     endpoints, err := arangodbHTTP.NewConnection(arangodbHTTP.ConnectionConfig{
         Endpoints: []string{config.ArangoDB.Host},
+		TLSConfig: tlsConfig,
     })
 	if err != nil {
 		log.Fatal(err)
